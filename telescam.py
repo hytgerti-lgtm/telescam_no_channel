@@ -12,6 +12,8 @@ from aiogram.types import (
     LinkPreviewOptions
 )
 from aiogram.exceptions import TelegramBadRequest
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiohttp import web
 
 # --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
 _active_offers = {}
@@ -180,11 +182,40 @@ async def process_decline(callback: types.CallbackQuery):
     try: await callback.message.edit_text("❌ Вы отклонили предложение.")
     except TelegramBadRequest: pass
 
-async def main():
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
+
+async def on_startup(bot: Bot):
+    external_url = os.getenv("RENDER_EXTERNAL_URL")
+    if not external_url:
+        raise RuntimeError("Не найдена переменная RENDER_EXTERNAL_URL. Запускай приложение на Render Web Service.")
+    if not WEBHOOK_SECRET:
+        raise RuntimeError("Добавь переменную окружения WEBHOOK_SECRET в настройках Render.")
+    webhook_url = external_url.rstrip("/") + WEBHOOK_PATH
+    await bot.set_webhook(
+        url=webhook_url,
+        secret_token=WEBHOOK_SECRET,
+        drop_pending_updates=True,
+    )
+    log.info("Webhook установлен: %s", webhook_url)
+
+async def on_shutdown(bot: Bot):
+    await bot.delete_webhook()
+    await bot.session.close()
+
+def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
-    print("Бот запущен.")
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+    app = web.Application()
+    SimpleRequestHandler(
+        dispatcher=dp,
+        bot=bot,
+        secret_token=WEBHOOK_SECRET,
+    ).register(app, path=WEBHOOK_PATH)
+    setup_application(app, dp, bot=bot)
+    app.on_startup.append(lambda application: on_startup(bot))
+    app.on_cleanup.append(lambda application: on_shutdown(bot))
+    port = int(os.getenv("PORT", "10000"))
+    web.run_app(app, host="0.0.0.0", port=port)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
